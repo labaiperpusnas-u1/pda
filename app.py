@@ -3,7 +3,13 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
-from groq import Groq
+
+# Coba impor pustaka groq secara opsional
+try:
+    from groq import Groq
+    GROQ_AVAILABLE = True
+except ImportError:
+    GROQ_AVAILABLE = False
 
 # 1. Konfigurasi Halaman Streamlit
 st.set_page_config(
@@ -12,11 +18,14 @@ st.set_page_config(
     layout="centered"
 )
 
-# 2. Inisialisasi Klien Groq LLM (Mengambil API Key dari st.secrets)
-try:
-    groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-except Exception as e:
-    groq_client = None
+# 2. Inisialisasi Klien Groq (Aman dari Error)
+groq_client = None
+if GROQ_AVAILABLE:
+    try:
+        if "GROQ_API_KEY" in st.secrets:
+            groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+    except Exception:
+        groq_client = None
 
 # 3. Fungsi Load Data dan Model Embedding (Cached)
 @st.cache_resource
@@ -45,12 +54,12 @@ with st.spinner("Menyiapkan kecerdasan buatan arsip Masjid Syuhada..."):
 # 4. Tampilan Antarmuka (UI)
 st.title("🕌 Asisten Virtual Arsip Masjid Syuhada")
 st.markdown("""
-Chatbot ini didukung oleh AI interaktif untuk membantu Anda menjelajahi dokumen **Penyusunan Perencanaan Teknis Rehabilitasi Masjid Syuhada** menggunakan bahasa sehari-hari yang luwes.
+Chatbot ini dirancang untuk membantu Anda menjelajahi dokumen **Penyusunan Perencanaan Teknis Rehabilitasi Masjid Syuhada** secara interaktif.
 """)
 
-# Cek apakah API Key sudah dipasang di Streamlit Secrets
+# Status Koneksi AI di sidebar / info kecil
 if not groq_client:
-    st.error("⚠️ GROQ_API_KEY belum dikonfigurasi! Harap tambahkan API Key di Streamlit Secrets Anda.")
+    st.info("ℹ️ Berjalan dalam mode **Smart Local RAG** (AI Cloud tidak aktif atau kunci belum dikonfigurasi, menggunakan pencarian dokumen cerdas mandiri).")
 
 # Inisialisasi Riwayat Chat
 if "messages" not in st.session_state:
@@ -62,58 +71,75 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# 5. Logika RAG dengan LLM
+# 5. Logika RAG & LLM (Dengan Fallback Otomatis)
 if user_query := st.chat_input("Tanyakan sesuatu mengenai dokumen Masjid Syuhada..."):
     st.session_state.messages.append({"role": "user", "content": user_query})
     with st.chat_message("user"):
         st.markdown(user_query)
 
     with st.chat_message("assistant"):
-        if not groq_client:
-            st.error("Harap atur Groq API Key terlebih dahulu.")
-        else:
-            with st.spinner("Sedang merangkum jawaban dengan AI..."):
-                # A. Retrieval (Cari dokumen paling relevan)
-                query_vector = embedding_model.encode([user_query])
-                similarities = cosine_similarity(query_vector, doc_embeddings)[0]
-                top_k_indices = np.argsort(similarities)[::-1][:2] # Ambil 2 dokumen teratas
-                
-                context_texts = []
-                sources_used = set()
-                for idx in top_k_indices:
-                    if similarities[idx] > 0.20:
-                        row = df_docs.iloc[idx]
-                        context_texts.append(f"- Judul: {row['Title']} (ID: {row['Identifier']})\n  Deskripsi: {row['Description']}\n  Kontributor: {row['Contributor']}")
-                        sources_used.add(row['Identifier'])
-                
-                retrieved_context_str = "\n\n".join(context_texts) if context_texts else "Tidak ada dokumen spesifik yang ditemukan."
+        with st.spinner("Mencari informasi relevan..."):
+            # A. Retrieval (Cari dokumen paling relevan via Semantic Search)
+            query_vector = embedding_model.encode([user_query])
+            similarities = cosine_similarity(query_vector, doc_embeddings)[0]
+            top_k_indices = np.argsort(similarities)[::-1][:2] # Ambil 2 dokumen teratas
+            
+            context_texts = []
+            sources_used = set()
+            for idx in top_k_indices:
+                if similarities[idx] > 0.20:
+                    row = df_docs.iloc[idx]
+                    context_texts.append(
+                        f"- **{row['Title']}** (ID: `{row['Identifier']}`)\n"
+                        f"  *Deskripsi:* {row['Description']}\n"
+                        f"  *Pencipta/Kontributor:* {row['Creator']} / {row['Contributor']}\n"
+                        f"  *Subjek:* {row['Subject']}"
+                    )
+                    sources_used.add(row['Identifier'])
+            
+            response_text = ""
+            ai_success = False
 
-                # B. Prompt Engineering untuk LLM agar Luwes & Natural
-                system_prompt = f"""
-                Anda adalah asisten virtual yang ramah, profesional, dan cerdas untuk arsip proyek "Penyusunan Perencanaan Teknis Rehabilitasi Masjid Syuhada".
-                Tugas Anda adalah menjawab pertanyaan pengguna berdasarkan KONTEKS DOKUMEN di bawah ini dengan gaya bahasa manusia yang natural, luwes, dan mudah dipahami.
-                Jangan menyebutkan ID dokumen secara kaku kecuali ditanya, cukup jelaskan isinya secara mengalir. Jika informasi tidak ada dalam konteks, katakan dengan sopan bahwa informasi tersebut tidak tersedia di dalam dokumen arsip.
+            # B. Coba gunakan Groq LLM jika klien aktif
+            if groq_client and context_texts:
+                try:
+                    retrieved_context_str = "\n\n".join(context_texts)
+                    system_prompt = f"""
+                    Anda adalah asisten virtual yang ramah dan profesional untuk arsip proyek "Penyusunan Perencanaan Teknis Rehabilitasi Masjid Syuhada".
+                    Jawablah pertanyaan pengguna berdasarkan KONTEKS DOKUMEN di bawah ini dengan gaya bahasa manusia yang natural, luwes, dan mudah dipahami.
 
-                KONTEKS DOKUMEN:
-                {retrieved_context_str}
-                """
+                    KONTEKS DOKUMEN:
+                    {retrieved_context_str}
+                    """
+                    
+                    chat_completion = groq_client.chat.completions.create(
+                        model="llama-3.1-8b-instant",
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_query}
+                        ],
+                        temperature=0.7,
+                        max_tokens=1024,
+                    )
+                    response_text = chat_completion.choices[0].message.content
+                    if sources_used:
+                        response_text += f"\n\n*(Referensi Dokumen ID: {', '.join(list(sources_used))})*"
+                    ai_success = True
+                except Exception:
+                    ai_success = False # Jika gagal, otomatis turun ke mode lokal
 
-                # C. Panggil Groq LLM dengan model universal yang sangat stabil
-                chat_completion = groq_client.chat.completions.create(
-                    model="llama-3.1-8b-instant",  # Model standar Groq yang pasti ada dan sangat cepat
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_query}
-                    ],
-                    temperature=0.7,
-                    max_tokens=1024,
-                )
-                
-                response_text = chat_completion.choices[0].message.content
-                
-                # Tambahkan referensi sumber di bawah jawaban
-                if sources_used:
+            # C. Fallback: Jika Groq gagal/tidak aktif, tampilkan hasil penarikan dokumen secara rapi
+            if not ai_success:
+                if context_texts:
+                    response_text = "Berikut adalah informasi yang saya temukan berdasarkan arsip dokumen:\n\n"
+                    response_text += "\n\n".join(context_texts)
                     response_text += f"\n\n*(Referensi Dokumen ID: {', '.join(list(sources_used))})*"
+                else:
+                    response_text = (
+                        "Maaf, saya tidak menemukan informasi yang spesifik mengenai pertanyaan tersebut di dalam dokumen arsip "
+                        "Perencanaan Teknis Rehabilitasi Masjid Syuhada. Coba tanyakan hal lain terkait laporan kegiatan, "
+                        "gambar teknis, sejarah, inventarisasi kerusakan, atau panduan pelestariannya."
+                    )
 
-            st.markdown(response_text)
-            st.session_state.messages.append({"role": "assistant", "content": response_text})
+        st.markdown(response_text)
+        st.session_state.messages.append({"role": "assistant", "content": response_text})
