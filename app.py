@@ -98,9 +98,9 @@ if user_query := st.chat_input("Tanyakan sesuatu mengenai dokumen Masjid Syuhada
                 {retrieved_context_str}
                 """
 
-                # C. Panggil Groq LLM (Llama-3 model)
+                # C. Panggil Groq LLM (Menggunakan model terbaru yang stabil)
                 chat_completion = groq_client.chat.completions.create(
-                    model="llama3-70b-8192",  # Model LLM berkecepatan tinggi & akurat
+                    model="llama-3.3-70b-versatile",  # Model aktif & stabil dari Groq
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_query}
